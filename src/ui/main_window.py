@@ -7,10 +7,10 @@ from PyQt5.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QFileDialog,
     QDialog, QLineEdit, QFormLayout, QSpinBox, QTextEdit,
     QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QDateTimeEdit
+    QAbstractItemView, QDateTimeEdit, QShortcut
 )
 from PyQt5.QtCore import Qt, QDateTime, QDate, QTime, QTimer
-from PyQt5.QtGui import QFont, QColor, QStandardItemModel, QStandardItem
+from PyQt5.QtGui import QFont, QColor, QStandardItemModel, QStandardItem, QKeySequence
 
 from src.models.database import Database
 from src.utils.export import export_to_excel
@@ -254,6 +254,7 @@ class TimeTrackerWindow(QMainWindow):
         self.project_filter = QLineEdit()
         self.project_filter.setPlaceholderText("Filter...")
         self.project_filter.setFixedWidth(300)
+        self.project_filter.setToolTip("Shortcut: Alt+F")
         self.project_filter.textChanged.connect(self.on_project_filter_changed)
         filter_row.addWidget(self.project_filter)
         filter_row.addStretch()
@@ -267,6 +268,8 @@ class TimeTrackerWindow(QMainWindow):
         self.project_combo = QComboBox()
         self.project_combo.setModel(QStandardItemModel(self.project_combo))
         self.project_combo.setFixedWidth(300)
+        self.project_combo.setMaxVisibleItems(15)
+        self.project_combo.setToolTip("Shortcut: Alt+P")
         self.project_combo.currentIndexChanged.connect(self.on_project_combo_changed)
         project_row.addWidget(self.project_combo)
 
@@ -368,19 +371,22 @@ class TimeTrackerWindow(QMainWindow):
         self.comment_edit = QTextEdit()
         self.comment_edit.setMaximumHeight(60)
         self.comment_edit.setPlaceholderText("Enter details about your work...")
+        self.comment_edit.setToolTip("Shortcut: Alt+K")
         main_layout.addWidget(self.comment_edit)
         
         # Action buttons
         action_layout = QHBoxLayout()
         
-        start_btn = QPushButton("Start Timer")
+        start_btn = QPushButton("Start Timer [F5]")
         start_btn.clicked.connect(self.start_timer)
         start_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        start_btn.setToolTip("Shortcut: F5")
         action_layout.addWidget(start_btn)
         
-        stop_btn = QPushButton("Stop Timer")
+        stop_btn = QPushButton("Stop Timer [F6]")
         stop_btn.clicked.connect(self.stop_timer)
         stop_btn.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
+        stop_btn.setToolTip("Shortcut: F6")
         action_layout.addWidget(stop_btn)
         
         add_manual_btn = QPushButton("Add Manual Entry")
@@ -409,18 +415,13 @@ class TimeTrackerWindow(QMainWindow):
         self.entries_table.itemDoubleClicked.connect(self.on_entry_double_clicked)
         main_layout.addWidget(self.entries_table)
         
-        # Export and end day buttons
+        # Export and entry action buttons
         end_day_layout = QHBoxLayout()
         
         export_btn = QPushButton("Export to Excel")
         export_btn.clicked.connect(self.export_to_excel)
         export_btn.setStyleSheet("background-color: #2196F3; color: white;")
         end_day_layout.addWidget(export_btn)
-        
-        end_day_btn = QPushButton("End Day")
-        end_day_btn.clicked.connect(self.end_day)
-        end_day_btn.setStyleSheet("background-color: #FF9800; color: white;")
-        end_day_layout.addWidget(end_day_btn)
 
         edit_entry_btn = QPushButton("Edit Entry")
         edit_entry_btn.clicked.connect(self.edit_selected_entry)
@@ -439,7 +440,16 @@ class TimeTrackerWindow(QMainWindow):
         # Load initial data
         self.refresh_projects()
         self.refresh_entries()
+        self._setup_shortcuts()
     
+    def _setup_shortcuts(self):
+        """Setup keyboard shortcuts for common actions."""
+        QShortcut(QKeySequence("Alt+F"), self).activated.connect(self.project_filter.setFocus)
+        QShortcut(QKeySequence("Alt+P"), self).activated.connect(self.project_combo.setFocus)
+        QShortcut(QKeySequence("Alt+K"), self).activated.connect(self.comment_edit.setFocus)
+        QShortcut(QKeySequence("F5"), self).activated.connect(self.start_timer)
+        QShortcut(QKeySequence("F6"), self).activated.connect(self.stop_timer)
+
     def refresh_projects(self, selected_project_id: int = None):
         """Refresh the project list in the combo box."""
         self._updating_projects = True
@@ -847,26 +857,3 @@ class TimeTrackerWindow(QMainWindow):
             QMessageBox.information(self, "Success", f"Exported to {filename}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Export failed: {str(e)}")
-    
-    def end_day(self):
-        """End the work day and prompt for export."""
-        reply = QMessageBox.question(
-            self, 
-            "End Day", 
-            "Do you want to export today's entries before ending the day?",
-            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
-        )
-        
-        if reply == QMessageBox.Cancel:
-            return
-        
-        if reply == QMessageBox.Yes:
-            try:
-                entries = self.db.get_time_entries_by_date()
-                if entries:
-                    export_to_excel(entries)
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Export failed: {str(e)}")
-        
-        QMessageBox.information(self, "End Day", "Have a great day!")
-        self.timer.stop()
