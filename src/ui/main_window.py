@@ -13,7 +13,6 @@ from PyQt5.QtCore import Qt, QDateTime, QDate, QTime, QTimer
 from PyQt5.QtGui import QFont, QColor, QStandardItemModel, QStandardItem, QKeySequence
 
 from src.models.database import Database
-from src.utils.export import export_to_excel
 
 
 class AddProjectDialog(QDialog):
@@ -306,6 +305,7 @@ class TimeTrackerWindow(QMainWindow):
             "120200 | Reisezeit"
         ])
         self.leistungsart_combo.setFixedWidth(300)
+        self.leistungsart_combo.setToolTip("Shortcut: Alt+L")
         leistungsart_row.addWidget(self.leistungsart_combo)
         leistungsart_row.addStretch()
         controls_layout.addLayout(leistungsart_row)
@@ -323,6 +323,7 @@ class TimeTrackerWindow(QMainWindow):
             "P230000 | 4180 Montage TAS NH"
         ])
         self.arbeitsplatz_combo.setFixedWidth(300)
+        self.arbeitsplatz_combo.setToolTip("Shortcut: Alt+A")
         arbeitsplatz_row.addWidget(self.arbeitsplatz_combo)
         arbeitsplatz_row.addStretch()
         controls_layout.addLayout(arbeitsplatz_row)
@@ -361,6 +362,11 @@ class TimeTrackerWindow(QMainWindow):
         self.date_edit.setFixedWidth(300)
         self.date_edit.dateChanged.connect(self.refresh_entries)
         date_row.addWidget(self.date_edit)
+
+        today_btn = QPushButton("Today")
+        today_btn.clicked.connect(self.set_date_to_today)
+        date_row.addWidget(today_btn)
+
         date_row.addStretch()
         controls_layout.addLayout(date_row)
         
@@ -434,7 +440,13 @@ class TimeTrackerWindow(QMainWindow):
         end_day_layout.addWidget(delete_entry_btn)
         
         main_layout.addLayout(end_day_layout)
-        
+
+        # Footer
+        footer_label = QLabel("Version: 0.5  |  Published: 15. Apr 2026  |  Author: Marius Teppe  |  Contact: marius.teppe@horiba.com")
+        footer_label.setAlignment(Qt.AlignCenter)
+        footer_label.setStyleSheet("color: #888888; font-size: 10px; padding-top: 6px;")
+        main_layout.addWidget(footer_label)
+
         central_widget.setLayout(main_layout)
         
         # Load initial data
@@ -446,6 +458,8 @@ class TimeTrackerWindow(QMainWindow):
         """Setup keyboard shortcuts for common actions."""
         QShortcut(QKeySequence("Alt+F"), self).activated.connect(self.project_filter.setFocus)
         QShortcut(QKeySequence("Alt+P"), self).activated.connect(self.project_combo.setFocus)
+        QShortcut(QKeySequence("Alt+L"), self).activated.connect(self.leistungsart_combo.setFocus)
+        QShortcut(QKeySequence("Alt+A"), self).activated.connect(self.arbeitsplatz_combo.setFocus)
         QShortcut(QKeySequence("Alt+K"), self).activated.connect(self.comment_edit.setFocus)
         QShortcut(QKeySequence("F5"), self).activated.connect(self.start_timer)
         QShortcut(QKeySequence("F6"), self).activated.connect(self.stop_timer)
@@ -529,6 +543,10 @@ class TimeTrackerWindow(QMainWindow):
                 return True
         return False
     
+    def set_date_to_today(self):
+        """Set the date field to today's date."""
+        self.date_edit.setDate(QDate.currentDate())
+
     def refresh_entries(self):
         """Refresh the table of entries for the selected date."""
         self.entries_table.setRowCount(0)
@@ -845,15 +863,17 @@ class TimeTrackerWindow(QMainWindow):
         self.refresh_entries()
     
     def export_to_excel(self):
-        """Export all entries across all days to Excel."""
-        entries = self.db.get_time_entries_by_date()
+        """Export all entries for the selected month to Excel."""
+        selected_date = self.date_edit.date().toString("yyyy-MM-dd")
+        entries = self.db.get_time_entries_by_month(selected_date)
         
         if not entries:
-            QMessageBox.warning(self, "Warning", "No entries to export!")
+            QMessageBox.warning(self, "Warning", "No entries to export for the selected month!")
             return
         
         try:
-            filename = export_to_excel(entries)
+            from src.utils.export import export_to_excel as export_func
+            filename = export_func(entries)
             QMessageBox.information(self, "Success", f"Exported to {filename}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Export failed: {str(e)}")

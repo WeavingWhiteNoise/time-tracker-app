@@ -389,3 +389,35 @@ class Database:
         conn.close()
         self._sync_to_local()
         return success
+
+    def get_time_entries_by_month(self, date_str: str, project_id: int = None) -> list:
+        """Get all time entries for a specific month.
+        
+        Args:
+            date_str: Date string in format 'yyyy-MM-dd' (any day in the desired month)
+            project_id: Optional project filter
+            
+        Returns:
+            List of time entries for the entire month
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        query = """
+            SELECT te.id, te.project_id, p.name, te.start_time, te.end_time, 
+                   te.duration_minutes, p.recipient, te.service_type, p.process, te.workplace, te.notes
+            FROM time_entries te
+            JOIN projects p ON te.project_id = p.id
+            WHERE strftime('%Y-%m', te.start_time) = strftime('%Y-%m', ?)
+        """
+        params = [date_str]
+        
+        if project_id:
+            query += " AND te.project_id = ?"
+            params.append(project_id)
+        
+        query += " ORDER BY te.start_time ASC"
+        cursor.execute(query, params)
+        entries = cursor.fetchall()
+        conn.close()
+        return entries

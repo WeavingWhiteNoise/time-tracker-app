@@ -23,6 +23,7 @@ exe = EXE(
     a.datas,
     [],
     name='TimeTracker',
+    icon='assets/clock_icon.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
