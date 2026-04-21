@@ -1,7 +1,16 @@
 """Export utilities for generating Excel reports."""
+import hashlib
+import os
+import getpass
 import pandas as pd
 from datetime import datetime
 from openpyxl.styles import Font, PatternFill
+
+
+def get_user_hash() -> str:
+    """Return a short deterministic hash based on the current Windows username."""
+    username = getpass.getuser()
+    return hashlib.sha256(username.encode()).hexdigest()[:12]
 
 
 def export_to_excel(time_entries: list, filename: str = None) -> str:
@@ -43,14 +52,15 @@ def export_to_excel(time_entries: list, filename: str = None) -> str:
     df = df.sort_values(by=['Date', '_sort_start', 'End Time'], ascending=[True, True, True], na_position='last')
     df = df.drop(columns=['_sort_start'])
     
-    # Generate filename with month if not provided
+    # Generate filename with user hash + month if not provided
     if filename is None:
         if not df.empty and df['Date'].notna().any():
             first_date = df[df['Date'].notna()]['Date'].iloc[0]
             month_str = pd.Timestamp(first_date).strftime("%Y-%m")
         else:
             month_str = datetime.now().strftime("%Y-%m")
-        filename = f"time_tracker_{month_str}.xlsx"
+        user_hash = get_user_hash()
+        filename = f"{user_hash}_{month_str}.xlsx"
     
     # Create Excel writer
     with pd.ExcelWriter(filename, engine='openpyxl') as writer:

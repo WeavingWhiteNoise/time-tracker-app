@@ -8,51 +8,97 @@ from pathlib import Path
 
 
 class Database:
-    """SQLite database manager for time tracking."""
+    """SQLite database manager with split project and entry stores."""
 
     @staticmethod
-    def _resolve_db_path(db_path: str) -> str:
-        """Return a single shared DB path for both script and EXE runs.
-
-        If no central DB exists yet, copy the newest existing local DB
-        (project root or dist folder) as initial seed.
-        """
-        input_path = Path(db_path)
+    def _resolve_db_path(db_name: str) -> str:
+        """Resolve a DB file into %APPDATA%/TimeTracker and seed from local copies."""
+        input_path = Path(db_name)
         if input_path.is_absolute():
             return str(input_path)
 
         appdata_root = Path(os.getenv("APPDATA", str(Path.home())))
         target_dir = appdata_root / "TimeTracker"
         target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = target_dir / db_path
+        target_path = target_dir / db_name
 
         if not target_path.exists():
-            candidates = [Path.cwd() / db_path, Path.cwd() / "dist" / db_path]
+            candidates = [Path.cwd() / db_name, Path.cwd() / "dist" / db_name]
             existing = [p for p in candidates if p.exists()]
             if existing:
                 newest = max(existing, key=lambda p: p.stat().st_mtime)
                 shutil.copy2(newest, target_path)
 
         return str(target_path)
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+        """Return True if a table exists in the given SQLite connection."""
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        )
+        return cursor.fetchone() is not None
+
+    @staticmethod
+    def _table_is_empty(conn: sqlite3.Connection, table_name: str) -> bool:
+        """Return True if a table has no rows."""
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+        return cursor.fetchone()[0] == 0
+
+    @staticmethod
+    def _available_columns(conn: sqlite3.Connection, table_name: str) -> list:
+        """Return column names for a table."""
+        cursor = conn.cursor()
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        return [row[1] for row in cursor.fetchall()]
+
+    @staticmethod
+    def _build_select_with_fallbacks(available_columns: list, desired_columns: list) -> str:
+        """Build select list that maps missing columns to NULL aliases."""
+        parts = []
+        for col in desired_columns:
+            if col in available_columns:
+                parts.append(col)
+            else:
+                parts.append(f"NULL AS {col}")
+        return ", ".join(parts)
     
     def __init__(self, db_path: str = "time_tracker.db"):
-        """Initialize database connection."""
-        self.db_path = self._resolve_db_path(db_path)
+        """Initialize split database paths and create/migrate schema."""
+        self.legacy_db_path = self._resolve_db_path(db_path)
+        self.projects_db_path = self._resolve_db_path("projects.db")
+        self.time_entries_db_path = self._resolve_db_path("time_entries.db")
+
+        # Kept for backward compatibility where external code may read this attr.
+        self.db_path = self.projects_db_path
+
         if getattr(sys, 'frozen', False):
             # Running as PyInstaller EXE (dist\TimeTracker.exe) → go one level up
             local_dir = Path(sys.executable).parent.parent
         else:
             local_dir = Path.cwd()
-        self.local_path = local_dir / Path(db_path).name
+
+        self.local_projects_path = local_dir / "projects.db"
+        self.local_time_entries_path = local_dir / "time_entries.db"
+
         self.init_database()
     
     def init_database(self):
-        """Create tables if they don't exist."""
-        conn = sqlite3.connect(self.db_path)
+        """Create split schemas and migrate data from legacy DB when needed."""
+        self._init_projects_database()
+        self._init_time_entries_database()
+        self._migrate_from_legacy_if_needed()
+        self._sync_to_local()
+
+    def _init_projects_database(self):
+        """Create and migrate projects schema."""
+        conn = sqlite3.connect(self.projects_db_path)
         cursor = conn.cursor()
-        
-        # Projects table
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS projects (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
@@ -66,11 +112,10 @@ class Database:
                 is_favorite INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        """)
+            """
+        )
 
-        # Backward-compatible migration for existing databases.
-        cursor.execute("PRAGMA table_info(projects)")
-        project_columns = [column[1] for column in cursor.fetchall()]
+        project_columns = self._available_columns(conn, "projects")
         if "is_favorite" not in project_columns:
             cursor.execute("ALTER TABLE projects ADD COLUMN is_favorite INTEGER DEFAULT 0")
         if "recipient" not in project_columns:
@@ -81,9 +126,16 @@ class Database:
             cursor.execute("ALTER TABLE projects ADD COLUMN process TEXT")
         if "workplace" not in project_columns:
             cursor.execute("ALTER TABLE projects ADD COLUMN workplace TEXT")
-        
-        # Time entries table
-        cursor.execute("""
+
+        conn.commit()
+        conn.close()
+
+    def _init_time_entries_database(self):
+        """Create and migrate time_entries schema."""
+        conn = sqlite3.connect(self.time_entries_db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS time_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER NOT NULL,
@@ -93,28 +145,164 @@ class Database:
                 service_type TEXT,
                 workplace TEXT,
                 notes TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (project_id) REFERENCES projects(id)
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        """)
+            """
+        )
 
-        # Add missing columns to time_entries if they don't exist
-        cursor.execute("PRAGMA table_info(time_entries)")
-        time_entries_columns = [column[1] for column in cursor.fetchall()]
+        time_entries_columns = self._available_columns(conn, "time_entries")
         if "service_type" not in time_entries_columns:
             cursor.execute("ALTER TABLE time_entries ADD COLUMN service_type TEXT")
         if "workplace" not in time_entries_columns:
             cursor.execute("ALTER TABLE time_entries ADD COLUMN workplace TEXT")
-        
+
         conn.commit()
         conn.close()
-        self._sync_to_local()
+
+    def _migrate_from_legacy_if_needed(self):
+        """Migrate data from legacy unified DB into split DB files."""
+        legacy_path = Path(self.legacy_db_path)
+        if (
+            not legacy_path.exists()
+            or str(legacy_path.resolve()) == str(Path(self.projects_db_path).resolve())
+            or str(legacy_path.resolve()) == str(Path(self.time_entries_db_path).resolve())
+        ):
+            return
+
+        legacy_conn = sqlite3.connect(self.legacy_db_path)
+        projects_conn = sqlite3.connect(self.projects_db_path)
+        entries_conn = sqlite3.connect(self.time_entries_db_path)
+
+        try:
+            has_legacy_projects = self._table_exists(legacy_conn, "projects")
+            has_legacy_entries = self._table_exists(legacy_conn, "time_entries")
+
+            if has_legacy_projects and self._table_is_empty(projects_conn, "projects"):
+                desired_project_columns = [
+                    "id",
+                    "name",
+                    "recipient",
+                    "service_type",
+                    "process",
+                    "workplace",
+                    "cost_center",
+                    "project_manager",
+                    "working_place",
+                    "is_favorite",
+                    "created_at",
+                ]
+                available = self._available_columns(legacy_conn, "projects")
+                select_list = self._build_select_with_fallbacks(available, desired_project_columns)
+                legacy_rows = legacy_conn.execute(
+                    f"SELECT {select_list} FROM projects"
+                ).fetchall()
+                projects_conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO projects (
+                        id, name, recipient, service_type, process, workplace,
+                        cost_center, project_manager, working_place, is_favorite, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    legacy_rows,
+                )
+                projects_conn.commit()
+
+            if has_legacy_entries and self._table_is_empty(entries_conn, "time_entries"):
+                desired_entry_columns = [
+                    "id",
+                    "project_id",
+                    "start_time",
+                    "end_time",
+                    "duration_minutes",
+                    "service_type",
+                    "workplace",
+                    "notes",
+                    "created_at",
+                ]
+                available = self._available_columns(legacy_conn, "time_entries")
+                select_list = self._build_select_with_fallbacks(available, desired_entry_columns)
+                legacy_rows = legacy_conn.execute(
+                    f"SELECT {select_list} FROM time_entries"
+                ).fetchall()
+                entries_conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO time_entries (
+                        id, project_id, start_time, end_time, duration_minutes,
+                        service_type, workplace, notes, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    legacy_rows,
+                )
+                entries_conn.commit()
+        finally:
+            legacy_conn.close()
+            projects_conn.close()
+            entries_conn.close()
+
+    def _get_project_lookup(self) -> dict:
+        """Return project metadata keyed by project_id."""
+        conn = sqlite3.connect(self.projects_db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, name, recipient, service_type, process, workplace, is_favorite
+            FROM projects
+            """
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return {
+            row[0]: {
+                "name": row[1],
+                "recipient": row[2],
+                "service_type": row[3],
+                "process": row[4],
+                "workplace": row[5],
+                "is_favorite": row[6],
+            }
+            for row in rows
+        }
+
+    def _decorate_entry_rows(self, rows: list) -> list:
+        """Join entry rows with project metadata in Python."""
+        project_lookup = self._get_project_lookup()
+        decorated = []
+        for row in rows:
+            (
+                entry_id,
+                project_id,
+                start_time,
+                end_time,
+                duration_minutes,
+                service_type,
+                workplace,
+                notes,
+            ) = row
+            project = project_lookup.get(project_id, {})
+            decorated.append(
+                (
+                    entry_id,
+                    project_id,
+                    project.get("name"),
+                    start_time,
+                    end_time,
+                    duration_minutes,
+                    project.get("recipient"),
+                    service_type,
+                    project.get("process"),
+                    workplace,
+                    notes,
+                )
+            )
+        return decorated
     
     def _sync_to_local(self):
-        """Mirror the AppData DB to the local project folder after every write."""
+        """Mirror split AppData DB files to the local project folder."""
         try:
-            if str(self.local_path.resolve()) != str(Path(self.db_path).resolve()):
-                shutil.copy2(self.db_path, self.local_path)
+            if str(self.local_projects_path.resolve()) != str(Path(self.projects_db_path).resolve()):
+                shutil.copy2(self.projects_db_path, self.local_projects_path)
+            if str(self.local_time_entries_path.resolve()) != str(Path(self.time_entries_db_path).resolve()):
+                shutil.copy2(self.time_entries_db_path, self.local_time_entries_path)
         except OSError:
             pass
 
@@ -125,7 +313,7 @@ class Database:
         process: str = "",
     ) -> int:
         """Add a new project."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.projects_db_path)
         cursor = conn.cursor()
         
         try:
@@ -148,7 +336,7 @@ class Database:
         process: str = "",
     ) -> bool:
         """Update an existing project."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.projects_db_path)
         cursor = conn.cursor()
 
         cursor.execute(
@@ -170,7 +358,7 @@ class Database:
 
         Favorites are ordered first, then by project name.
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.projects_db_path)
         cursor = conn.cursor()
 
         if filter_text:
@@ -198,7 +386,7 @@ class Database:
 
     def get_project_by_id(self, project_id: int) -> tuple:
         """Get project by ID."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.projects_db_path)
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -214,7 +402,7 @@ class Database:
 
     def set_project_favorite(self, project_id: int, is_favorite: bool) -> bool:
         """Set or unset favorite flag for a project."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.projects_db_path)
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE projects SET is_favorite = ? WHERE id = ?",
@@ -229,7 +417,7 @@ class Database:
     def start_time_entry(self, project_id: int, start_time: str, notes: str = "", 
                          service_type: str = "", workplace: str = "") -> int:
         """Start a new time entry."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.time_entries_db_path)
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -244,7 +432,7 @@ class Database:
     
     def end_time_entry(self, entry_id: int, end_time: str, notes: str = None) -> bool:
         """End a time entry, calculate duration, and optionally update notes."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.time_entries_db_path)
         cursor = conn.cursor()
         
         # Get start time
@@ -280,58 +468,57 @@ class Database:
     def get_time_entries_by_date(self, project_id: int = None, 
                                 date_str: str = None) -> list:
         """Get time entries for a specific date (or all if no date specified)."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.time_entries_db_path)
         cursor = conn.cursor()
         
         if date_str:
             query = """
-                SELECT te.id, te.project_id, p.name, te.start_time, te.end_time, 
-                       te.duration_minutes, p.recipient, te.service_type, p.process, te.workplace, te.notes
-                FROM time_entries te
-                JOIN projects p ON te.project_id = p.id
-                WHERE DATE(te.start_time) = ?
+                SELECT id, project_id, start_time, end_time,
+                       duration_minutes, service_type, workplace, notes
+                FROM time_entries
+                WHERE DATE(start_time) = ?
             """
             params = [date_str]
             
             if project_id:
-                query += " AND te.project_id = ?"
+                query += " AND project_id = ?"
                 params.append(project_id)
         else:
             query = """
-                SELECT te.id, te.project_id, p.name, te.start_time, te.end_time, 
-                       te.duration_minutes, p.recipient, te.service_type, p.process, te.workplace, te.notes
-                FROM time_entries te
-                JOIN projects p ON te.project_id = p.id
+                SELECT id, project_id, start_time, end_time,
+                       duration_minutes, service_type, workplace, notes
+                FROM time_entries
             """
             params = []
             
             if project_id:
-                query += " WHERE te.project_id = ?"
+                query += " WHERE project_id = ?"
                 params.append(project_id)
         
-        query += " ORDER BY te.start_time DESC"
+        query += " ORDER BY start_time DESC"
         cursor.execute(query, params)
-        entries = cursor.fetchall()
+        rows = cursor.fetchall()
         conn.close()
-        return entries
+        return self._decorate_entry_rows(rows)
 
     def get_time_entry_by_id(self, entry_id: int) -> tuple:
         """Get one time entry with joined project metadata."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.time_entries_db_path)
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT te.id, te.project_id, p.name, te.start_time, te.end_time,
-                   te.duration_minutes, p.recipient, te.service_type, p.process, te.workplace, te.notes
-            FROM time_entries te
-            JOIN projects p ON te.project_id = p.id
-            WHERE te.id = ?
+            SELECT id, project_id, start_time, end_time,
+                   duration_minutes, service_type, workplace, notes
+            FROM time_entries
+            WHERE id = ?
             """,
             (entry_id,),
         )
-        entry = cursor.fetchone()
+        row = cursor.fetchone()
         conn.close()
-        return entry
+        if not row:
+            return None
+        return self._decorate_entry_rows([row])[0]
 
     def update_time_entry(
         self,
@@ -348,7 +535,7 @@ class Database:
         end_dt = datetime.fromisoformat(end_time)
         duration = int((end_dt - start_dt).total_seconds() / 60)
 
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.time_entries_db_path)
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -381,7 +568,7 @@ class Database:
     
     def delete_time_entry(self, entry_id: int) -> bool:
         """Delete a time entry."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.time_entries_db_path)
         cursor = conn.cursor()
         cursor.execute("DELETE FROM time_entries WHERE id = ?", (entry_id,))
         conn.commit()
@@ -400,24 +587,23 @@ class Database:
         Returns:
             List of time entries for the entire month
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.time_entries_db_path)
         cursor = conn.cursor()
         
         query = """
-            SELECT te.id, te.project_id, p.name, te.start_time, te.end_time, 
-                   te.duration_minutes, p.recipient, te.service_type, p.process, te.workplace, te.notes
-            FROM time_entries te
-            JOIN projects p ON te.project_id = p.id
-            WHERE strftime('%Y-%m', te.start_time) = strftime('%Y-%m', ?)
+            SELECT id, project_id, start_time, end_time,
+                   duration_minutes, service_type, workplace, notes
+            FROM time_entries
+            WHERE strftime('%Y-%m', start_time) = strftime('%Y-%m', ?)
         """
         params = [date_str]
         
         if project_id:
-            query += " AND te.project_id = ?"
+            query += " AND project_id = ?"
             params.append(project_id)
         
-        query += " ORDER BY te.start_time ASC"
+        query += " ORDER BY start_time ASC"
         cursor.execute(query, params)
-        entries = cursor.fetchall()
+        rows = cursor.fetchall()
         conn.close()
-        return entries
+        return self._decorate_entry_rows(rows)
